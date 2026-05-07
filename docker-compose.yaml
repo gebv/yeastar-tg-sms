@@ -1,19 +1,16 @@
 # yeastar-tg-sms Docker Compose Configuration
 #
-# This file defines the yeastar-tg-bot service — a Telegram bot that forwards
-# SMS messages from a Yeastar PBX to Telegram chats.
-#
 # Setup:
 #   1. Copy .env.example to .env and fill in your values:
 #        cp .env.example .env
-#   2. Start the bot:
-#        docker compose up -d
+#   2. Build and start the bot:
+#        docker compose up -d --build
 #   3. View logs:
-#        docker logs yeastar-tg-bot
+#        docker logs -f yeastar-tg-bot
 #
 # The ./data directory is created automatically by Docker on first run and
-# stores the persistent SQLite database (sms.db). This bind mount ensures SMS
-# data survives container restarts and rebuilds.
+# stores the persistent SQLite database (sms.db). Data survives container
+# restarts and rebuilds.
 
 services:
   yeastar-tg-bot:

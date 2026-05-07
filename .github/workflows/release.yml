@@ -44,7 +44,7 @@ jobs:
           # Setup:
           #   1. cp .env.example .env
           #   2. Edit .env with your configuration
-          #   3. docker compose up -d
+          #   3. docker compose up -d --build
           #
           # The ./data directory is created automatically on first run
           # and stores the persistent SQLite database (sms.db).
