@@ -30,11 +30,9 @@ jobs:
           cat > Dockerfile << 'EOF'
           FROM alpine:3.21
           RUN apk --no-cache add ca-certificates tzdata
-          RUN adduser -D -h /app appuser
           COPY yeastar-tg-bot /app/yeastar-tg-bot
-          RUN chmod +x /app/yeastar-tg-bot && chown -R appuser:appuser /app
-          USER appuser
           WORKDIR /app
+          RUN mkdir -p /app/data && chmod +x /app/yeastar-tg-bot
           CMD ["/app/yeastar-tg-bot"]
           EOF
 
