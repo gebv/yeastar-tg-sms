@@ -242,11 +242,13 @@ func runAMISignaler(ctx context.Context, cfg *Config, h *health.Tracker, smsSign
 				SMSReceivedFn: func(sms api.SMSReceived) {
 					// Signal only — do NOT extract content.
 					// The Web UI fetcher will pull fresh data.
+					log.Printf("[AMI] ReceivedSMS event → sending signal to fetcher")
 					h.TouchAMILastEvent()
 					select {
 					case smsSignal <- struct{}{}:
+						log.Printf("[AMI] Signal sent to fetcher OK")
 					default:
-						// Channel full — fetch is already pending.
+						log.Printf("[AMI] Signal channel full — fetch is already pending")
 					}
 				},
 			},
@@ -314,10 +316,12 @@ func runWebUIFetcher(ctx context.Context, s *store.Store, bot *tgbot.Bot, h *hea
 	for {
 		select {
 		case <-smsSignal:
+			log.Printf("[Fetcher] AMI signal received, debounce timer started (%v)", debounceDelay)
 			// Reset the debounce timer
 			debounceTimer = time.After(debounceDelay)
 		case <-debounceTimer:
 			debounceTimer = nil
+			log.Printf("[Fetcher] Debounce timer fired, fetching from Web UI...")
 			fetchAndNotify(s, bot, h, webUI)
 		case <-ctx.Done():
 			return
@@ -331,15 +335,13 @@ func fetchAndNotify(s *store.Store, bot *tgbot.Bot, h *health.Tracker, webUI *we
 	records, err := webUI.fetchRecent()
 	if err != nil {
 		h.SetWebUIError(err.Error())
-		log.Printf("[WebUI] Fetch failed: %v", err)
+		log.Printf("[Fetcher] WebUI fetch failed: %v", err)
 		return
 	}
 
 	newCount := processWebUIRecords(records, s, bot)
 	h.SetWebUISync()
-	if newCount > 0 {
-		log.Printf("[WebUI] Debounced fetch: %d new SMS", newCount)
-	}
+	log.Printf("[Fetcher] Fetch complete: %d total, %d new", len(records), newCount)
 }
 
 // ---------------------------------------------------------------------------

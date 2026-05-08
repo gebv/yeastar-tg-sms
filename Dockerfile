@@ -26,20 +26,15 @@ FROM alpine:3.21
 # Install CA certificates for TLS (Telegram API) and timezone data
 RUN apk --no-cache add ca-certificates tzdata
 
-# Create non-root user with home directory /app
-RUN adduser -D -h /app appuser
-
 # Copy binary from builder
 COPY --from=builder /out/yeastar-tg-bot /app/yeastar-tg-bot
 
-# Ensure the app directory is writable by appuser for sms.db
-RUN chown -R appuser:appuser /app
-
-# Switch to non-root user
-USER appuser
-
-# Set working directory
+# Create data directory for persistent SQLite database.
+# When bind-mounting ./data:/app/data from docker-compose,
+# Docker creates the host directory as root — so we run as root
+# to avoid permission issues with the SQLite WAL file.
 WORKDIR /app
+RUN mkdir -p /app/data && chmod +x /app/yeastar-tg-bot
 
 # No ports to expose — this is an outbound-only service
 

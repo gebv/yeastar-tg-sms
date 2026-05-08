@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  packages: write
 
 jobs:
   release:
@@ -19,7 +18,6 @@ jobs:
         with:
           go-version: "1.24"
 
-      # ── Build binary ──────────────────────────────────────────
       - name: Build binary
         run: |
           VERSION=${{ github.ref_name }}
@@ -27,55 +25,33 @@ jobs:
             go build -ldflags="-s -w -X main.version=${VERSION}" \
             -o yeastar-tg-bot ./cmd/yeastar-tg-bot/
 
-      # ── Build & push Docker image to GHCR ─────────────────────
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create release Dockerfile
+        run: |
+          cat > Dockerfile << 'EOF'
+          FROM alpine:3.21
+          RUN apk --no-cache add ca-certificates tzdata
+          COPY yeastar-tg-bot /app/yeastar-tg-bot
+          WORKDIR /app
+          RUN mkdir -p /app/data && chmod +x /app/yeastar-tg-bot
+          CMD ["/app/yeastar-tg-bot"]
+          EOF
 
-      - name: Extract metadata for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: VERSION=${{ github.ref_name }}
-
-      # ── Prepare release archive ───────────────────────────────
       - name: Create release docker-compose.yaml
         run: |
-          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          cat > docker-compose.yaml << EOF
-          # yeastar-tg-bot — Docker Compose (release)
-          #
-          # This file runs the pre-built image from GitHub Container Registry.
-          # The image is built and published automatically for each release.
+          cat > docker-compose.yaml << 'EOF'
+          # yeastar-tg-bot
           #
           # Setup:
           #   1. cp .env.example .env
           #   2. Edit .env with your configuration
-          #   3. docker compose up -d
+          #   3. docker compose up -d --build
           #
-          # The ./data directory is created automatically by Docker on first run
+          # The ./data directory is created automatically on first run
           # and stores the persistent SQLite database (sms.db).
-          # SMS data survives container restarts and rebuilds.
 
           services:
             yeastar-tg-bot:
-              image: ghcr.io/${REPO_LOWER}:${{ github.ref_name }}
+              build: .
               container_name: yeastar-tg-bot
               restart: unless-stopped
               env_file:
@@ -86,52 +62,13 @@ jobs:
                 - DB_PATH=/app/data/sms.db
           EOF
 
-      - name: Create install script
-        run: |
-          cat > install.sh << 'INSTALL_EOF'
-          #!/bin/sh
-          set -e
-
-          INSTALL_DIR="/opt/yeastar-tg-bot"
-
-          echo "Installing yeastar-tg-bot to ${INSTALL_DIR}..."
-          mkdir -p "${INSTALL_DIR}/data"
-          cp yeastar-tg-bot "${INSTALL_DIR}/"
-          chmod +x "${INSTALL_DIR}/yeastar-tg-bot"
-          cp docker-compose.yaml "${INSTALL_DIR}/"
-          cp .env.example "${INSTALL_DIR}/"
-          cp README.md "${INSTALL_DIR}/"
-
-          echo ""
-          echo "Installation complete!"
-          echo ""
-          echo "Option A — Docker (recommended):"
-          echo "  1. cd ${INSTALL_DIR}"
-          echo "  2. cp .env.example .env"
-          echo "  3. Edit .env with your configuration"
-          echo "  4. docker compose up -d"
-          echo ""
-          echo "Option B — Binary only (no Docker):"
-          echo "  1. cd ${INSTALL_DIR}"
-          echo "  2. cp .env.example .env"
-          echo "  3. Edit .env with your configuration"
-          echo "  4. ./yeastar-tg-bot"
-          echo ""
-          echo "Useful commands (Docker):"
-          echo "  docker compose logs -f       # View logs"
-          echo "  docker compose down          # Stop"
-          echo "  docker compose restart       # Restart"
-          INSTALL_EOF
-          chmod +x install.sh
-
       - name: Create release archive
         run: |
           ARCHIVE_NAME="yeastar-tg-bot-${{ github.ref_name }}-linux-amd64"
           mkdir -p "${ARCHIVE_NAME}"
-          cp yeastar-tg-bot docker-compose.yaml .env.example README.md install.sh "${ARCHIVE_NAME}/"
+          cp yeastar-tg-bot Dockerfile docker-compose.yaml .env.example README.md "${ARCHIVE_NAME}/"
           tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
 
-      # ── Publish GitHub Release ────────────────────────────────
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:

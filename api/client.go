@@ -161,27 +161,36 @@ type Client struct {
 
 // Config holds the configuration for a Yeastar AMI client.
 type Config struct {
-	Addr     string        // Address in "host:port" format (e.g. "GATEWAY_IP:5038")
-	Username string        // AMI username
-	Password string        // AMI password/secret
-	Handler  Handler       // Event handler for incoming events
+	Addr     string   // Address in "host:port" format (e.g. "192.168.1.1:5038")
+	Username string   // AMI username
+	Password string   // AMI password/secret
+	Handler  Handler // Event handler for incoming events
 }
 
 // New creates a new AMI client and connects to the Yeastar gateway.
 // It logs in using the provided credentials and starts processing events.
+//
+// The provided ctx is used ONLY for the initial connection (dial, banner,
+// login). Once connected, the client uses its own internal context for the
+// event dispatcher, reader, and writer — so they survive after the caller's
+// context expires (e.g., a connection timeout). The client shuts down when
+// Close() is called or the connection is lost.
 func New(ctx context.Context, cfg Config) (*Client, error) {
 	if cfg.Handler == nil {
 		cfg.Handler = HandlerFunc{} // no-op handler
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
-
+	// Dial with the caller's context (may have a timeout for connection).
 	var dial net.Dialer
 	conn, err := dial.DialContext(ctx, "tcp", cfg.Addr)
 	if err != nil {
-		cancel()
 		return nil, fmt.Errorf("connection failed: %w", err)
 	}
+
+	// Internal context: cancelled only by Close() or connection loss.
+	// NOT derived from the caller's ctx, so a timeout in the caller's
+	// context does NOT kill the event dispatcher after login succeeds.
+	internalCtx, internalCancel := context.WithCancel(context.Background())
 
 	c := &Client{
 		conn:      conn,
@@ -189,34 +198,34 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 		incoming:  make(chan []string, 256),
 		responses: make(chan []string, 32),
 		handler:   cfg.Handler,
-		cancel:    cancel,
+		wg:        sync.WaitGroup{},
+		cancel:    internalCancel,
 		done:      make(chan struct{}),
 	}
 
-	// Start reader and writer first. The event dispatcher is NOT started
-	// yet — we need to read the banner and login response synchronously
-	// from c.incoming before the dispatcher starts consuming that channel.
+	// Start reader and writer. They run until the connection is closed.
 	c.wg.Add(2)
 	go c.runReader()
 	go c.runWriter()
 
-	// Read the Asterisk Call Manager banner (reads directly from c.incoming)
+	// Read the banner and login using the caller's context (may have timeout).
+	// These read directly from c.incoming before the dispatcher starts.
 	if err := c.readBanner(ctx); err != nil {
-		c.Close()
+		internalCancel()
+		conn.Close()
 		return nil, fmt.Errorf("failed to read AMI banner: %w", err)
 	}
 
-	// Login (sends command, then reads response from c.incoming)
 	if err := c.Login(ctx, cfg.Username, cfg.Password); err != nil {
-		c.Close()
+		internalCancel()
+		conn.Close()
 		return nil, err
 	}
 
-	// Login succeeded — now start the event dispatcher. From this point on,
-	// all messages from c.incoming are routed by the dispatcher: events go
-	// to the handler, responses go to c.responses.
+	// Start the event dispatcher with the internal context.
+	// This goroutine lives until Close() is called or the parent cancels.
 	c.wg.Add(1)
-	go c.runEventDispatcher(ctx)
+	go c.runEventDispatcher(internalCtx)
 
 	return c, nil
 }
@@ -403,39 +412,12 @@ func (c *Client) runWriter() {
 	}
 }
 
-// runEventDispatcher reads incoming AMI messages and dispatches them to the handler.
-// Non-event messages (responses) are forwarded to the responses channel for
-// synchronous reads by Login, readBanner, etc.
-func (c *Client) runEventDispatcher(ctx context.Context) {
-	defer c.wg.Done()
-
-	for {
-		select {
-		case msg := <-c.incoming:
-			if isAMIMessageEvent(msg) {
-				c.dispatchEvent(msg)
-			} else {
-				// It's a response (like login result), forward it to the responses channel
-				log.Printf("[DISPATCHER] forwarding non-event message to responses: %s", sanitizeAMIMessage(msg))
-				select {
-				case c.responses <- msg:
-				case <-ctx.Done():
-					return
-				}
-			}
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-// isAMIMessageEvent returns true if the message is an AMI event (starts with "Event: ").
+// isAMIMessageEvent returns true if the message is an AMI event we care about
+// (ReceivedSMS or UpdateSMSSend) and NOT a response.
 func isAMIMessageEvent(msg []string) bool {
 	for _, line := range msg {
 		if strings.HasPrefix(line, "Event: ") {
 			eventName := strings.TrimPrefix(line, "Event: ")
-			// "Newstate", "Newchannel", etc. are events
-			// But some events like "Follows" in "Response: Follows" are not
 			// Check if there's also a "Response:" header - if so, it's a response, not a standalone event
 			for _, l := range msg {
 				if strings.HasPrefix(l, "Response: ") {
@@ -466,6 +448,34 @@ func (c *Client) dispatchEvent(msg []string) {
 	case EventUpdateSMSSend:
 		status := parseSMSSendStatus(fields)
 		c.handler.OnSMSSendStatus(status)
+	}
+}
+
+// runEventDispatcher reads incoming AMI messages and dispatches them to the handler.
+// Non-event messages (responses) are forwarded to the responses channel for
+// synchronous reads by Login, readBanner, etc.
+func (c *Client) runEventDispatcher(ctx context.Context) {
+	defer c.wg.Done()
+
+	for {
+		select {
+		case msg := <-c.incoming:
+			if isAMIMessageEvent(msg) {
+				c.dispatchEvent(msg)
+			} else {
+				// It's a response (like login result), forward it to the responses channel
+				log.Printf("[DISPATCHER] forwarding non-event message to responses: %s", sanitizeAMIMessage(msg))
+				select {
+				case c.responses <- msg:
+				case <-ctx.Done():
+					log.Printf("[DISPATCHER] context cancelled, stopping")
+					return
+				}
+			}
+		case <-ctx.Done():
+			log.Printf("[DISPATCHER] context cancelled, stopping")
+			return
+		}
 	}
 }
 
