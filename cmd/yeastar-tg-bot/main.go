@@ -42,11 +42,15 @@ func main() {
 	h := health.New(time.Now())
 
 	// Initialize Telegram bot
-	bot, err := tgbot.New(cfg.TGBotToken, cfg.TGChatID, s, h)
+	bot, err := tgbot.New(cfg.TGBotToken, cfg.TGChatID, s, h, cfg.TGProxyURL)
 	if err != nil {
 		log.Fatalf("Telegram bot init failed: %v", err)
 	}
-	log.Printf("Telegram bot started")
+	if cfg.TGProxyURL != "" {
+		log.Printf("Telegram bot started (proxy: %s)", cfg.TGProxyURL)
+	} else {
+		log.Printf("Telegram bot started (direct connection)")
+	}
 
 	// Web UI session manager (reuses login session, reconnects on expiry)
 	webUI := &webUISession{
@@ -103,6 +107,7 @@ type Config struct {
 	WebPass     string // Web UI password
 	TGBotToken  string // Telegram bot API token
 	TGChatID    int64  // Authorized Telegram chat ID
+	TGProxyURL  string // SOCKS5 proxy URL for Telegram (optional, e.g., "socks5://user:pass@host:port")
 	DBPath      string // SQLite database file path
 }
 
@@ -123,6 +128,7 @@ func loadConfig() *Config {
 		WebPass:     envOrDie("YEASTAR_WEB_PASS"),
 		TGBotToken:  envOrDie("TG_BOT_TOKEN"),
 		TGChatID:    chatID,
+		TGProxyURL:  os.Getenv("TG_PROXY_URL"), // optional, empty = no proxy
 		DBPath:      envOrDefault("DB_PATH", "sms.db"),
 	}
 }

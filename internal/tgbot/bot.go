@@ -5,9 +5,12 @@ package tgbot
 import (
 	"fmt"
 	"log"
+	"net/http"
+	"net/url"
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"golang.org/x/net/proxy"
 
 	"github.com/gebv/yeastar-tg-sms/internal/health"
 	"github.com/gebv/yeastar-tg-sms/internal/store"
@@ -38,8 +41,28 @@ type Bot struct {
 
 // New creates a Bot. The bot will only process messages from chatID;
 // all other chats are silently ignored.
-func New(token string, chatID int64, s *store.Store, h *health.Tracker) (*Bot, error) {
-	api, err := tgbotapi.NewBotAPI(token)
+// If proxyURL is non-empty, all Telegram API requests are routed through
+// the specified SOCKS5 proxy (e.g. "socks5://user:pass@host:port").
+func New(token string, chatID int64, s *store.Store, h *health.Tracker, proxyURL string) (*Bot, error) {
+	var httpClient *http.Client
+
+	if proxyURL != "" {
+		client, err := newSOCKS5Client(proxyURL)
+		if err != nil {
+			return nil, fmt.Errorf("configure SOCKS5 proxy: %w", err)
+		}
+		httpClient = client
+		log.Printf("[BOT] Using SOCKS5 proxy: %s", proxyURL)
+	}
+
+	var api *tgbotapi.BotAPI
+	var err error
+
+	if httpClient != nil {
+		api, err = tgbotapi.NewBotAPIWithClient(token, tgbotapi.APIEndpoint, httpClient)
+	} else {
+		api, err = tgbotapi.NewBotAPI(token)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("create bot api: %w", err)
 	}
@@ -54,6 +77,45 @@ func New(token string, chatID int64, s *store.Store, h *health.Tracker) (*Bot, e
 		smsCh:  make(chan *store.SMS, 256),
 		done:   make(chan struct{}),
 	}, nil
+}
+
+// newSOCKS5Client creates an HTTP client that routes all connections through
+// the given SOCKS5 proxy URL. Supported formats:
+//   - socks5://host:port
+//   - socks5://user:pass@host:port
+func newSOCKS5Client(proxyURL string) (*http.Client, error) {
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse proxy URL: %w", err)
+	}
+
+	if u.Scheme != "socks5" {
+		return nil, fmt.Errorf("unsupported proxy scheme %q (only \"socks5\" is supported)", u.Scheme)
+	}
+
+	// Extract auth info before creating the dialer (proxy.SOCKS5 reads
+	// User from the URL directly, but we handle it ourselves for clarity).
+	var auth *proxy.Auth
+	if u.User != nil {
+		auth = &proxy.Auth{
+			User:     u.User.Username(),
+			Password: "",
+		}
+		if p, ok := u.User.Password(); ok {
+			auth.Password = p
+		}
+	}
+
+	dialer, err := proxy.SOCKS5("tcp", u.Host, auth, proxy.Direct)
+	if err != nil {
+		return nil, fmt.Errorf("create SOCKS5 dialer: %w", err)
+	}
+
+	transport := &http.Transport{
+		DialContext: dialer.(proxy.ContextDialer).DialContext,
+	}
+
+	return &http.Client{Transport: transport}, nil
 }
 
 // NotifySMS enqueues an SMS for delivery to the Telegram chat.
